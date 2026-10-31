@@ -319,9 +319,10 @@ body{font-size:14px}
      <div class="pay-opt" data-pay="card">
       <label class="pay-row"><input type="radio" name="pay" value="card"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="5" width="20" height="14" rx="2.5"/><path d="M2 10h20M6 15h4"/></svg><span class="pay-name">Credit or debit card<span class="pay-sub">Visa, Mastercard, RuPay, Amex</span></span><span class="pay-tag">Extra 10% off</span></label>
       <div class="pay-panel">
-       <div class="co-f" data-f="cnum"><label for="coCardNum">Card number</label><div class="co-rel"><input id="coCardNum" name="cardnumber" inputmode="numeric" autocomplete="cc-number" placeholder="1234 5678 9012 3456" maxlength="23"><span class="co-card-brand" id="coCardBrand"></span></div><p class="co-err" id="coCardNumErr"></p></div>
-       <div class="co-f" data-f="cname"><label for="coCardName">Name on card</label><input id="coCardName" name="ccname" autocomplete="cc-name"><p class="co-err" id="coCardNameErr"></p></div>
-       <div class="co-grid keep2">
+       <p class="pay-hint" style="margin-top:0">You will enter your card details securely in the Razorpay window on the next step.</p>
+       <div class="co-f" data-f="cnum" hidden style="display:none"><label for="coCardNum">Card number</label><div class="co-rel"><input id="coCardNum" name="cardnumber" inputmode="numeric" autocomplete="cc-number" placeholder="1234 5678 9012 3456" maxlength="23"><span class="co-card-brand" id="coCardBrand"></span></div><p class="co-err" id="coCardNumErr"></p></div>
+       <div class="co-f" data-f="cname" style="display:none"><label for="coCardName">Name on card</label><input id="coCardName" name="ccname" autocomplete="cc-name"><p class="co-err" id="coCardNameErr"></p></div>
+       <div class="co-grid keep2" style="display:none">
         <div class="co-f" data-f="cexp"><label for="coCardExp">Expiry (MM / YY)</label><input id="coCardExp" name="cc-exp" inputmode="numeric" autocomplete="cc-exp" placeholder="MM / YY" maxlength="7"><p class="co-err" id="coCardExpErr"></p></div>
         <div class="co-f" data-f="ccvv"><label for="coCardCvv">CVV</label><input id="coCardCvv" name="cvc" inputmode="numeric" autocomplete="cc-csc" placeholder="3 digits" maxlength="4" type="password"><p class="co-err" id="coCardCvvErr"></p></div>
        </div>
@@ -1037,7 +1038,9 @@ const CFG={
   SHIP_FEE:99,         // delivery fee below that subtotal
   PREPAID_PCT:10,      // extra % off for UPI, card, net banking, wallets
   COD_FEE:0,           // extra fee for cash on delivery (0 = none)
-  DEMO:true,           // true = no payment is taken. Set false once a gateway is connected
+  DEMO:false,          // true = no payment is taken. Set false once a gateway is connected
+  RZP_KEY:'rzp_live_TuXTVD19V4bVKP', // Razorpay key id (public)
+  BRAND:'CavalloLuxe',
   WA:'917439024943'
 };
 const COUPONS={
@@ -1264,15 +1267,6 @@ function validate(){
   mark('city',v('coCity').length>0,'Enter your city.',bad);
   mark('state',!!v('coState'),'Select your state.',bad);
   if(method==='upi')mark('upi',/^[\w.\-]{2,256}@[a-zA-Z][a-zA-Z0-9.]{1,63}$/.test(v('coUpi')),'Enter a valid UPI ID, like name@bank.',bad);
-  if(method==='card'){
-    const d=v('coCardNum').replace(/\s/g,''),b=cardBrand(d);
-    mark('cnum',d.length>=(b==='Amex'?15:13)&&luhn(d),'Enter a valid card number.',bad);
-    mark('cname',v('coCardName').length>=2,'Enter the name on the card.',bad);
-    const m=v('coCardExp').match(/^(\d{2}) \/ (\d{2})$/);let okExp=false;
-    if(m){const mm=+m[1],yy=2000+ +m[2];okExp=mm>=1&&mm<=12&&new Date(yy,mm,1)>new Date()}
-    mark('cexp',okExp,'Enter a valid expiry date.',bad);
-    mark('ccvv',v('coCardCvv').length===(b==='Amex'?4:3),'Enter the '+(b==='Amex'?'4':'3')+'-digit CVV.',bad);
-  }
   if(method==='netbanking'&&!bank){el('coBankErr').classList.add('bad');bad.push(el('coBankErr'))}
   if(method==='wallet'&&!wallet){el('coWalletErr').classList.add('bad');bad.push(el('coWalletErr'))}
   return bad;
@@ -1298,8 +1292,45 @@ function persistSaved(){
 /* Connect your payment gateway here (Razorpay, Cashfree, PayU...).
    Resolve with {ok:true} after a successful payment, or {ok:false,message:'...'}.
    For cash on delivery no payment step is needed. */
+let lastPaymentId='';
+function loadRazorpay(){
+  return new Promise(function(resolve,reject){
+    if(window.Razorpay)return resolve();
+    const sc=document.createElement('script');sc.src='https://checkout.razorpay.com/v1/checkout.js';
+    sc.onload=resolve;sc.onerror=function(){reject(new Error('Could not load Razorpay'))};
+    document.head.appendChild(sc);
+  });
+}
 function processPayment(order){
-  return new Promise(function(resolve){setTimeout(function(){resolve({ok:true})},1100)});
+  lastPaymentId='';
+  if(order.method==='cod')return Promise.resolve({ok:true});
+  return loadRazorpay().then(function(){
+    return new Promise(function(resolve){
+      const first=el('coFirst').value.trim(),last=el('coLast').value.trim();
+      const prefill={name:(first+' '+last).trim(),email:order.email,contact:'+91'+order.phone};
+      const rzpMethod={upi:'upi',card:'card',netbanking:'netbanking',wallet:'wallet'}[order.method];
+      if(order.method==='upi'&&el('coUpi').value.trim())prefill.vpa=el('coUpi').value.trim();
+      if(rzpMethod)prefill.method=rzpMethod;
+      let done=false;
+      const rzp=new Razorpay({
+        key:CFG.RZP_KEY,
+        amount:Math.round(order.amount*100),
+        currency:'INR',
+        name:CFG.BRAND,
+        description:'Order payment',
+        prefill:prefill,
+        theme:{color:'#111111'},
+        handler:function(r){done=true;lastPaymentId=r.razorpay_payment_id||'';resolve({ok:true,paymentId:lastPaymentId})},
+        modal:{ondismiss:function(){if(!done)resolve({ok:false,message:'Payment was cancelled. You can try again.'})}}
+      });
+      rzp.on('payment.failed',function(r){
+        done=true;
+        resolve({ok:false,message:(r&&r.error&&r.error.description)||'Payment failed. Try again or pick another method.'});
+        try{rzp.close()}catch(_){}
+      });
+      rzp.open();
+    });
+  }).catch(function(err){return {ok:false,message:err.message||'Could not start payment'}});
 }
 el('coForm').addEventListener('submit',function(e){
   e.preventDefault();
@@ -1329,7 +1360,7 @@ function submitRemote(c){
   const first=f('coFirst'),last=f('coLast'),addr=[f('coAddr'),f('coAddr2'),f('coCity')+', '+el('coState').value+' '+f('coPin')].filter(Boolean).join(', ');
   const id='CL'+String(Date.now()).slice(-8);
   const subTotal=c.L.reduce((sum,x)=>sum+(Number(x.p.price)||0)*(Number(x.it.qty)||0),0),adjustment=(Number(c.total)||0)-subTotal;
-  const order={id,source:'storefront',at:Date.now(),name:(first+' '+last).trim(),phone:f('coPhone'),email:f('coEmail'),addr,items:c.L.map(x=>({pid:'CL-'+String(x.p.id).padStart(3,'0'),name:x.p.name,size:x.it.size,qty:x.it.qty,price:x.p.price})),method:method==='cod'?'cod':'prepaid',prepaidOk:method!=='cod',amount:c.total,discount:Math.max(0,-adjustment),ship:Math.max(0,adjustment),coupon:coupon||'',status:'pending',collections:[],notes:[],history:[{at:Date.now(),t:'Order placed on website'}],paymentLabel:method};
+  const order={id,source:'storefront',at:Date.now(),name:(first+' '+last).trim(),phone:f('coPhone'),email:f('coEmail'),addr,items:c.L.map(x=>({pid:'CL-'+String(x.p.id).padStart(3,'0'),name:x.p.name,size:x.it.size,qty:x.it.qty,price:x.p.price})),method:method==='cod'?'cod':'prepaid',prepaidOk:method!=='cod',amount:c.total,discount:Math.max(0,-adjustment),ship:Math.max(0,adjustment),coupon:coupon||'',status:'pending',collections:[],notes:[],history:[{at:Date.now(),t:'Order placed on website'}].concat(lastPaymentId?[{at:Date.now(),t:'Razorpay payment '+lastPaymentId}]:[]),paymentLabel:method};
   return window.__clFirebase.writeOrder(order).then(()=>{placing=false;btn.disabled=false;return{id,total:c.total}}).catch(err=>{placing=false;btn.disabled=false;toast('Connection problem. Your order was not saved: '+(err.message||''));renderAll();return null});
 }
 function finish(c,srv){
@@ -1337,7 +1368,7 @@ function finish(c,srv){
   if(srv&&srv.total!=null)c.total=srv.total;
   const id=(srv&&srv.id)||'CL'+Math.floor(100000+Math.random()*900000);
   const first=el('coFirst').value.trim(),last=el('coLast').value.trim();
-  const payLabel=method==='netbanking'?'Net banking · '+bank:method==='wallet'?'Wallet · '+wallet:method==='upi'?'UPI · '+el('coUpi').value.trim():method==='card'?'Card ending '+el('coCardNum').value.replace(/\D/g,'').slice(-4):'Cash on delivery';
+  const payLabel=method==='netbanking'?'Net banking · '+bank:method==='wallet'?'Wallet · '+wallet:method==='upi'?'UPI · '+el('coUpi').value.trim():method==='card'?'Card (Razorpay)':'Cash on delivery';
   const addr=[el('coAddr').value.trim(),el('coAddr2').value.trim(),el('coCity').value.trim()+', '+el('coState').value+' '+el('coPin').value.trim()].filter(Boolean).join(', ');
   const email=el('coEmail').value.trim(),phone=el('coPhone').value.trim();
   try{
